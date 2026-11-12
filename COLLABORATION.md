@@ -1,60 +1,145 @@
-# Orca Collaboration Guide
+# Orca-C Collaboration Guide
 
-Orca supports real-time collaborative editing, allowing multiple users to work on the same grid simultaneously. This guide covers how to set up and use the collaboration features.
+**Real-time collaborative music coding!** 🎵✨
 
-## Quick Start
+Orca-C now supports real-time collaborative editing, allowing up to 10 people to work on the same grid simultaneously. See each other's cursors, sync playback, and create music together!
 
-### Starting a Server (Host)
+---
 
-1. Open Orca
+## 🚀 Quick Start
+
+### Option 1: Starting a Server (Host)
+
+**The server is the "host" - they control playback and hold the source-of-truth grid.**
+
+1. Launch Orca: `./build/orca` (or just `orca` if installed)
 2. Press `Ctrl+D` to open the menu
-3. Select "Collaboration"
-4. Select "Start Server"
-5. Enter a port number (default: 7777)
+3. Navigate to `Collaboration` → `Start Server...`
+4. Enter a port number (press Enter for default: `7777`)
+5. You'll see **`SRV:0`** in the status bar (green) - server is running!
 6. Share your IP address and port with collaborators
 
-### Joining a Server (Client)
+**Finding your IP address:**
+```bash
+# Local network (LAN)
+ip addr show | grep inet    # Linux
+ifconfig | grep inet        # macOS
 
-1. Open Orca
+# For internet collaboration
+curl ifconfig.me
+```
+
+### Option 2: Joining a Server (Client)
+
+**Clients can edit the grid but cannot control playback (play/pause/BPM).**
+
+1. Launch Orca: `./build/orca`
 2. Press `Ctrl+D` to open the menu
-3. Select "Collaboration"
-4. Select "Join Server"
-5. Enter `hostname:port` (e.g., `192.168.1.100:7777`)
-6. Press Enter to connect
+3. Navigate to `Collaboration` → `Join Server...`
+4. Enter server address in one of these formats:
+   - `192.168.1.100:7777` (IP address with port)
+   - `localhost:7777` (local server)
+   - `192.168.1.100` (uses default port 7777)
+5. Enter your display name (e.g., "Alice")
+6. Press Enter - you'll see **`CLIENT`** in the status bar (cyan)
+7. Grid will sync, and you're ready to collaborate!
 
 ### Disconnecting
 
-1. Press `Ctrl+D` to open the menu
-2. Select "Collaboration"
-3. Select "Disconnect"
+- Press `Ctrl+D` → `Collaboration` → `Disconnect`
+- Or just quit Orca (it disconnects automatically)
 
-## Features
+---
 
-### Real-Time Grid Sync
-- All changes are synchronized instantly across all connected clients
-- Single character edits, selections, cut/paste, and delete operations
-- Full grid state is sent to new clients when they join
+## 🎨 Example Session
 
-### Multi-Cursor Display
-- See where other collaborators are working in real-time
-- Each user is assigned a unique color
-- Cursor positions update 20 times per second
+Here's a complete walkthrough of a 3-person jam session:
 
-### Playback Sync
-- Play/pause state is synchronized across all clients
-- BPM changes are broadcast to all users
-- Tick counter stays in sync (with automatic drift correction)
+### Step 1: Alice starts the server
 
-### Join/Leave Notifications
-- See when collaborators connect or disconnect
-- Notifications appear briefly at the bottom of the screen
+```bash
+# Terminal 1 - Alice (Server)
+$ ./build/orca
+[Opens menu with Ctrl+D]
+Collaboration → Start Server... → Port: 7777
+Status bar shows: SRV:0 (0 clients connected)
+Alice's IP: 192.168.1.100
+```
 
-### Auto-Resync
-- Grid integrity is verified every 5 seconds using checksums
-- If corruption is detected, the grid automatically resyncs
-- This ensures all clients stay in perfect sync
+### Step 2: Bob joins as client
 
-## Configuration
+```bash
+# Terminal 2 - Bob (Client)
+$ ./build/orca
+[Opens menu with Ctrl+D]
+Collaboration → Join Server...
+Server: 192.168.1.100:7777
+Name: Bob
+[Connects]
+Status bar shows: CLIENT
+```
+
+Alice now sees: **`SRV:1`** (1 client connected)
+Notification appears: **"Bob joined"** 🟡
+
+### Step 3: Carol joins as client
+
+```bash
+# Terminal 3 - Carol (Client)
+$ ./build/orca
+[Opens menu with Ctrl+D]
+Collaboration → Join Server...
+Server: 192.168.1.100:7777
+Name: Carol
+[Connects]
+Status bar shows: CLIENT
+```
+
+Alice now sees: **`SRV:2`** (2 clients connected)
+Notification appears: **"Carol joined"** 🔵
+
+### Step 4: Everyone collaborates!
+
+- **Alice (server)** sees Bob's yellow cursor and Carol's blue cursor
+- **Bob** sees Alice's green cursor and Carol's blue cursor
+- **Carol** sees Alice's green cursor and Bob's yellow cursor
+- Everyone types and edits - changes appear instantly for all
+- Alice presses **spacebar** → everyone starts playing together
+- Alice changes **BPM** → everyone's tempo updates
+- Someone disconnects → notification shows **"Bob left"**
+
+---
+
+## ✨ Features
+
+### 🔄 Real-Time Grid Sync
+- **Instant updates**: See edits as they happen
+- **All operations sync**: Typing, cut, paste, fill, slide
+- **New joiners get full state**: Late arrivals see the current grid
+
+### 👥 Multi-Cursor Display
+- **10 unique colors**: Each person has a distinct cursor color
+- **See selections**: Rectangular selections show in cursor color
+- **20 updates/second**: Smooth cursor movement
+- **Auto-cleanup**: Inactive cursors fade after 10 seconds
+
+### 🎵 Synchronized Playback
+- **Server controls**: Only the host can play/pause
+- **BPM sync**: Tempo changes instantly across all clients
+- **Tick sync**: Everyone hears the exact same timing
+- **Client restriction**: Clients see "Playback controlled by server" if they try to play/pause
+
+### 📢 Notifications
+- **Join/leave alerts**: "Alice joined" / "Bob left"
+- **Auto-dismiss**: Notifications disappear after 3 seconds
+- **Color-coded**: Match user's cursor color
+
+### 🔐 Auto-Resync Protection
+- **Hash verification**: Every 5 seconds, grids are checksummed
+- **Auto-recovery**: If corruption detected, instant resync
+- **Invisible**: Happens in background, you won't notice
+
+## ⚙️ Configuration
 
 Collaboration settings are saved to your `orca.conf` file. Available options:
 
@@ -123,62 +208,75 @@ After clicking "Join Server":
 3. **Syncing** - Receiving full grid from server
 4. **Active** - Fully connected and synchronized
 
-## Troubleshooting
+## 🔧 Troubleshooting
 
-### "Connection refused"
-- Server may not be running
-- Check the port number is correct
-- Verify server firewall allows incoming connections
+### Connection Issues
 
-### "Connection timed out"
-- Network connectivity issue
-- Server may be unreachable
-- Check if you can ping the server
+| Problem | Solution |
+|---------|----------|
+| **"Connection refused"** | • Server may not be running<br>• Check port number is correct<br>• Check firewall allows incoming connections |
+| **"Connection timed out"** | • Check network connectivity<br>• Verify server is reachable (`ping` the IP)<br>• Check router/firewall settings |
+| **"Port already in use"** | • Another app is using the port<br>• Try a different port (e.g., 7778)<br>• Kill zombie process: `lsof -i :7777` then `kill <PID>` |
+| **"Permission denied"** | • Ports < 1024 need root access<br>• Use port ≥ 1024 (recommended: 7777) |
 
-### "Port already in use"
-- Another application (or another Orca instance) is using the port
-- Try a different port number
-- Check for zombie processes: `lsof -i :7777`
+### Sync Issues
 
-### "Permission denied" (ports < 1024)
-- Ports below 1024 require administrator privileges
-- Use a port number >= 1024 (7777 is recommended)
+| Problem | Solution |
+|---------|----------|
+| **Grid out of sync** | • Wait 5 seconds for auto-resync<br>• If persistent, disconnect and rejoin<br>• Server grid is authoritative |
+| **High latency** | • Normal over internet<br>• Edits are optimistic (instant locally)<br>• Use a server closer geographically |
+| **Client disconnects** | • Check network stability<br>• Server may have crashed<br>• Reconnect and continue |
 
-### Grid Out of Sync
-- Normally auto-corrects within 5 seconds
-- If persistent, try disconnecting and reconnecting
-- Server's grid is authoritative - clients resync to server
+### Playback Issues
 
-### High Latency
-- Normal for remote servers over the internet
-- Edits appear locally immediately, then sync
-- Consider using a server geographically closer to all participants
+| Problem | Solution |
+|---------|----------|
+| **Can't play/pause (client)** | • This is normal - only server controls playback<br>• Ask the server host to press spacebar |
+| **Can't change BPM (client)** | • This is normal - only server controls BPM<br>• Ask the server host to change tempo |
+| **Playback desyncs** | • Auto-corrects every 500ms<br>• If persistent, restart the session |
 
-### Client Disconnects Unexpectedly
-- Check network stability
-- Server may have crashed or been stopped
-- Try reconnecting
+## ⚠️ Known Limitations
 
-## Known Limitations
+### What Works
+✅ Up to 10 simultaneous clients
+✅ Real-time grid sync
+✅ Multi-cursor display
+✅ Synchronized playback
+✅ Auto-resync on corruption
+✅ All edit operations (type, cut, paste, fill, slide)
 
-### Current Limitations
-- Maximum 10 simultaneous clients
-- No authentication or authorization
-- No encryption (data sent in plaintext)
-- No conflict resolution - last write wins
-- No undo sync (each client has independent undo history)
-- No support for grid resize during session
+### What Doesn't Work (Yet)
+❌ Authentication/passwords
+❌ Encryption (data sent in plaintext)
+❌ Undo synchronization (each client has independent undo)
+❌ Grid resize during session
+❌ NAT traversal (need port forwarding for internet)
+❌ Conflict resolution (last write wins)
 
-### Security Warning
-**The collaboration feature has no built-in security.** Anyone who can connect to your server can:
-- See and modify the entire grid
-- See other users' cursor positions
-- See your display name
+### 🔒 Security Warning
+
+**⚠️ IMPORTANT: The collaboration feature has NO security.**
+
+Anyone who can connect to your server can:
+- ✏️ See and modify the entire grid
+- 👁️ See all users' cursor positions
+- 📝 See your display name
+
+**Safe to use:**
+- ✅ Local network (LAN) with trusted people
+- ✅ VPN with trusted collaborators
+- ✅ Localhost (testing)
+
+**NOT safe to use:**
+- ❌ Public internet without VPN
+- ❌ Untrusted networks
+- ❌ With sensitive/private content
 
 **Recommendations:**
-- Only use on trusted networks
-- Use a VPN for internet collaboration
-- Don't expose to the public internet without a firewall
+1. **Use a VPN** for internet collaboration (Tailscale, WireGuard, etc.)
+2. **Firewall rules** - only allow specific IPs if exposed to internet
+3. **Trusted networks only** - don't expose to public internet
+4. **Save frequently** - server crashes lose all unsaved work
 
 ## Protocol Overview
 
@@ -192,22 +290,87 @@ For developers interested in the protocol:
 
 See `docs/COLLABORATION_DESIGN.md` for full technical details.
 
-## Tips for Effective Collaboration
+## 💡 Tips for Effective Collaboration
 
-1. **Assign areas**: Different users work in different grid regions
-2. **Use BPM strategically**: Lower BPM gives more time to see changes
-3. **Communicate**: Use voice/text chat alongside Orca
-4. **Save often**: The server's grid is not automatically saved to disk
-5. **One conductor**: Let one person control play/pause to avoid conflicts
+### Best Practices
+1. **🗺️ Assign areas** - Different users work in different grid regions to minimize conflicts
+2. **🎼 Lower BPM** - Slower tempo gives everyone more time to see changes
+3. **💬 External communication** - Use voice/text chat alongside Orca (Discord, Zoom, etc.)
+4. **💾 Save often** - Server's grid is NOT auto-saved. Save frequently!
+5. **👨‍✈️ One conductor** - Designate the server host as the "conductor" for play/pause
+6. **🎨 Color coordination** - Use cursor colors to identify who's working where
+7. **⏸️ Pause before big changes** - Ask everyone to pause before major grid restructuring
 
-## Command Reference
+### Common Workflows
 
-| Action | Menu Path |
-|--------|-----------|
-| Start Server | Ctrl+D -> Collaboration -> Start Server |
-| Join Server | Ctrl+D -> Collaboration -> Join Server |
-| Disconnect | Ctrl+D -> Collaboration -> Disconnect |
+**🎹 Live Jamming:**
+- Server (host) controls playback and tempo
+- Clients add/modify operators in their assigned regions
+- Everyone hears the same output in real-time
 
-## Feedback and Issues
+**📝 Collaborative Composition:**
+- Work on different sections (intro, verse, chorus)
+- Lower BPM for easier editing
+- Use voice chat to coordinate changes
 
-If you encounter bugs or have suggestions for the collaboration features, please open an issue on the project's GitHub repository.
+**🎓 Teaching/Learning:**
+- Teacher hosts the server
+- Students connect as clients
+- Teacher demonstrates, students follow along
+- Students can experiment without affecting others' work
+
+---
+
+## 📋 Quick Reference
+
+### Menu Commands
+
+| Action | Path |
+|--------|------|
+| Start Server | `Ctrl+D` → `Collaboration` → `Start Server...` |
+| Join Server | `Ctrl+D` → `Collaboration` → `Join Server...` |
+| Disconnect | `Ctrl+D` → `Collaboration` → `Disconnect` |
+
+### Server Formats
+
+```
+192.168.1.100:7777   # IP with custom port
+192.168.1.100        # IP with default port (7777)
+localhost:7777       # Local server with custom port
+localhost            # Local server with default port
+```
+
+### Status Indicators
+
+| Indicator | Meaning |
+|-----------|---------|
+| `SRV:0` (green) | Server running, 0 clients connected |
+| `SRV:3` (green) | Server running, 3 clients connected |
+| `CLIENT` (cyan) | Connected to server as client |
+
+---
+
+## 🐛 Feedback and Issues
+
+Found a bug? Have a feature request?
+
+Please open an issue on the GitHub repository: **[mipdr/Orca-c-collab](https://github.com/mipdr/Orca-c-collab/issues)**
+
+Include:
+- What you were doing
+- What you expected to happen
+- What actually happened
+- Any error messages
+- Your OS and Orca version
+
+---
+
+## 📚 Further Reading
+
+- **Technical Design**: See `docs/COLLABORATION_DESIGN.md` for protocol details
+- **Orca Manual**: Press `?` in Orca for operator reference
+- **Original Orca**: https://github.com/hundredrabbits/Orca
+
+---
+
+**Happy collaborative music making! 🎵✨**
