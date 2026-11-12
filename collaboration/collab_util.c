@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
+#include <errno.h>
+#include <netdb.h>
 
 // Include xxHash implementation
 #define XXH_INLINE_ALL
@@ -234,8 +236,6 @@ const char *collab_error_user_friendly(int errcode) {
             return "Connection closed by server";
         case ENOENT:
             return "Hostname not found - check server address";
-        case EAI_NONAME:
-            return "Unknown hostname - could not resolve server address";
         case EACCES:
             return "Permission denied - need admin rights for ports < 1024";
         case EMFILE:
