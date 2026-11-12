@@ -173,6 +173,24 @@ You can also make `cli` read from stdin:
 echo -e "...\na34\n..." | cli /dev/stdin
 ```
 
+## Collaboration (Experimental)
+
+Orca now supports real-time collaborative editing! Multiple users can work on the same grid simultaneously.
+
+**Quick Start:**
+- **Host a session:** Press `Ctrl+D` -> `Collaboration` -> `Start Server`
+- **Join a session:** Press `Ctrl+D` -> `Collaboration` -> `Join Server` and enter `host:port`
+
+Features include:
+- Real-time grid synchronization
+- Multi-cursor display with unique colors per user
+- Playback state synchronization
+- Automatic integrity checking and resync
+
+See [COLLABORATION.md](COLLABORATION.md) for detailed documentation.
+
+**Note:** The collaboration feature has no built-in authentication or encryption. Only use on trusted networks.
+
 ## Extras
 
 - Discuss and get help in the [forum thread](https://llllllll.co/t/orca-live-coding-tool/17689).

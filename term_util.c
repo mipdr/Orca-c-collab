@@ -25,7 +25,49 @@ void term_util_init_colors() {
 #endif
       }
     }
+
+    // Initialize client cursor colors (10 distinct colors)
+    // These use foreground color on default background (black/transparent)
+    // Color pairs start at Client_color_pair_base
+    static const short client_fg_colors[Client_colors_count] = {
+      COLOR_CYAN,     // C_client_0: Cyan
+      COLOR_GREEN,    // C_client_1: Green
+      COLOR_YELLOW,   // C_client_2: Yellow
+      COLOR_MAGENTA,  // C_client_3: Magenta
+      COLOR_RED,      // C_client_4: Red
+      COLOR_BLUE,     // C_client_5: Blue
+      COLOR_WHITE,    // C_client_6: White
+      COLOR_CYAN,     // C_client_7: Teal (cyan with different attr)
+      COLOR_GREEN,    // C_client_8: Lime (green with different attr)
+      COLOR_MAGENTA,  // C_client_9: Purple (magenta with different attr)
+    };
+
+    for (int i = 0; i < Client_colors_count; ++i) {
+      init_pair((short int)(Client_color_pair_base + i),
+                client_fg_colors[i], -1);  // -1 = default background
+    }
   }
+}
+
+// Get color attributes for a client cursor
+attr_t client_cursor_attr(int color_index, bool is_local) {
+  // Clamp color_index to valid range
+  if (color_index < 0) color_index = 0;
+  if (color_index >= Client_colors_count) color_index = color_index % Client_colors_count;
+
+  attr_t attr = A_REVERSE | COLOR_PAIR(Client_color_pair_base + color_index);
+
+  // Local cursor is always bold to stand out more
+  if (is_local) {
+    attr |= A_BOLD;
+  }
+
+  // Some colors use bold for variation
+  if (color_index >= 7) {
+    attr |= A_BOLD;
+  }
+
+  return attr;
 }
 
 #define ORCA_CONTAINER_OF(ptr, type, member)                                   \
