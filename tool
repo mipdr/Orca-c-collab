@@ -336,6 +336,8 @@ build_target() {
     ;;
     orca|tui)
       add source_files osc_out.c term_util.c sysmisc.c thirdparty/oso.c tui_main.c
+      # Collaboration files
+      add source_files collaboration/collab_util.c collaboration/collab_protocol.c collaboration/collab_net.c collaboration/collab_sync.c collaboration/collab_server.c collaboration/collab_client.c collaboration/collab_cursor.c
       add cc_flags -D_XOPEN_SOURCE_EXTENDED=1
       # thirdparty headers (like sokol_time.h) should get -isystem for their
       # include dir so that any warnings they generate with our warning flags

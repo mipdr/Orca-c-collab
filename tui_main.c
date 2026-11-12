@@ -7,6 +7,9 @@
 #include "sysmisc.h"
 #include "term_util.h"
 #include "vmio.h"
+#include "collaboration/collab_cursor.h"
+#include "collaboration/collab_server.h"
+#include "collaboration/collab_client.h"
 #include <getopt.h>
 #include <locale.h>
 
@@ -298,6 +301,134 @@ staticni void draw_grid_cursor(WINDOW *win, int draw_y, int draw_x, int draw_h,
   }
 }
 
+// Draw a single remote cursor with specified color
+// Similar to draw_grid_cursor but uses client_cursor_attr for color
+staticni void draw_remote_cursor(WINDOW *win, int draw_y, int draw_x,
+                                  int draw_h, int draw_w,
+                                  Glyph const *gbuffer, Usz field_h,
+                                  Usz field_w, int scroll_y, int scroll_x,
+                                  Usz cursor_y, Usz cursor_x,
+                                  Usz cursor_h, Usz cursor_w,
+                                  int color_index, bool is_local) {
+  if (cursor_y >= field_h || cursor_x >= field_w)
+    return;
+  if (scroll_y < 0) {
+    draw_y += -scroll_y;
+    scroll_y = 0;
+  }
+  if (scroll_x < 0) {
+    draw_x += -scroll_x;
+    scroll_x = 0;
+  }
+  Usz offset_y = (Usz)scroll_y;
+  Usz offset_x = (Usz)scroll_x;
+  if (offset_y >= field_h || offset_x >= field_w)
+    return;
+  if (draw_y >= draw_h || draw_x >= draw_w)
+    return;
+
+  attr_t const curs_attr = client_cursor_attr(color_index, is_local);
+
+  // Draw cursor head (the main cursor position)
+  if (offset_y <= cursor_y && offset_x <= cursor_x) {
+    Usz cdraw_y = cursor_y - offset_y + (Usz)draw_y;
+    Usz cdraw_x = cursor_x - offset_x + (Usz)draw_x;
+    if (cdraw_y < (Usz)draw_h && cdraw_x < (Usz)draw_w) {
+      // For remote cursor, just highlight the existing character
+      // Don't use @ or ~ - those are for local cursor only
+      Glyph beneath = gbuffer[cursor_y * field_w + cursor_x];
+      char displayed = (beneath == '.') ? '.' : beneath;
+      chtype ch = (chtype)displayed | curs_attr;
+      wmove(win, (int)cdraw_y, (int)cdraw_x);
+      waddchnstr(win, &ch, 1);
+    }
+  }
+
+  // Early out for selection area that won't have any visual effect
+  if (cursor_h <= 1 && cursor_w <= 1)
+    return;
+
+  // Draw selection rectangle
+  Usz sel_rows = field_h - cursor_y;
+  if (cursor_h < sel_rows)
+    sel_rows = cursor_h;
+  Usz sel_cols = field_w - cursor_x;
+  if (cursor_w < sel_cols)
+    sel_cols = cursor_w;
+
+  Usz vis_sel_y;
+  Usz vis_sel_x;
+  if (offset_y > cursor_y) {
+    vis_sel_y = 0;
+    Usz sub_y = offset_y - cursor_y;
+    if (sub_y > sel_rows)
+      sel_rows = 0;
+    else
+      sel_rows -= sub_y;
+  } else {
+    vis_sel_y = cursor_y - offset_y;
+  }
+  if (offset_x > cursor_x) {
+    vis_sel_x = 0;
+    Usz sub_x = offset_x - cursor_x;
+    if (sub_x > sel_cols)
+      sel_cols = 0;
+    else
+      sel_cols -= sub_x;
+  } else {
+    vis_sel_x = cursor_x - offset_x;
+  }
+  vis_sel_y += (Usz)draw_y;
+  vis_sel_x += (Usz)draw_x;
+  if (vis_sel_y >= (Usz)draw_h || vis_sel_x >= (Usz)draw_w)
+    return;
+  Usz vis_sel_h = (Usz)draw_h - vis_sel_y;
+  Usz vis_sel_w = (Usz)draw_w - vis_sel_x;
+  if (sel_rows < vis_sel_h)
+    vis_sel_h = sel_rows;
+  if (sel_cols < vis_sel_w)
+    vis_sel_w = sel_cols;
+  if (vis_sel_w == 0 || vis_sel_h == 0)
+    return;
+
+  enum { Bufcount = 4096 };
+  chtype chbuffer[Bufcount];
+  if (Bufcount < vis_sel_w)
+    vis_sel_w = Bufcount;
+  for (Usz iy = 0; iy < vis_sel_h; ++iy) {
+    int at_y = (int)(vis_sel_y + iy);
+    int num = mvwinchnstr(win, at_y, (int)vis_sel_x, chbuffer, (int)vis_sel_w);
+    for (int ix = 0; ix < num; ++ix) {
+      chbuffer[ix] = (chtype)((chbuffer[ix] & (A_CHARTEXT | A_ALTCHARSET)) |
+                              (chtype)curs_attr);
+    }
+    waddchnstr(win, chbuffer, (int)num);
+  }
+}
+
+// Draw all remote cursors from the cursor list
+staticni void draw_all_remote_cursors(WINDOW *win, int draw_y, int draw_x,
+                                       int draw_h, int draw_w,
+                                       Glyph const *gbuffer, Usz field_h,
+                                       Usz field_w, int scroll_y, int scroll_x,
+                                       const Remote_cursor_list *rcl,
+                                       U8 my_client_id) {
+  // Draw remote cursors first, so local cursor appears on top
+  for (int i = 0; i < COLLAB_MAX_CLIENTS; ++i) {
+    const Remote_cursor *cursor = &rcl->cursors[i];
+    if (!cursor->active || cursor->client_id == 0)
+      continue;
+    // Don't draw our own cursor from remote list
+    if (cursor->client_id == my_client_id)
+      continue;
+
+    draw_remote_cursor(win, draw_y, draw_x, draw_h, draw_w,
+                       gbuffer, field_h, field_w, scroll_y, scroll_x,
+                       cursor->y, cursor->x, cursor->h, cursor->w,
+                       (int)cursor->color_index, false);
+  }
+}
+
 typedef struct Undo_node {
   Field field;
   Usz tick_num;
@@ -455,11 +586,19 @@ staticni void advance_faketab(WINDOW *win, int offset_x, int tabstop) {
   wmove(win, y, x);
 }
 
+// Collaboration mode enum (forward declaration needed before draw_hud)
+typedef enum {
+  Collab_mode_none = 0,
+  Collab_mode_server,
+  Collab_mode_client,
+} Collab_mode;
+
 staticni void draw_hud(WINDOW *win, int win_y, int win_x, int height, int width,
                        char const *filename, Usz field_h, Usz field_w,
                        Usz ruler_spacing_y, Usz ruler_spacing_x, Usz tick_num,
                        Usz bpm, Ged_cursor const *ged_cursor,
-                       Ged_input_mode input_mode, Usz activity_counter) {
+                       Ged_input_mode input_mode, Usz activity_counter,
+                       Collab_mode collab_mode, U8 num_clients) {
   (void)height;
   (void)width;
   enum { Tabstop = 8 };
@@ -473,6 +612,18 @@ staticni void draw_hud(WINDOW *win, int win_y, int win_x, int height, int width,
   wprintw(win, "%zu", bpm);
   advance_faketab(win, win_x, Tabstop);
   print_activity_indicator(win, activity_counter);
+  // Collaboration status indicator
+  if (collab_mode == Collab_mode_server) {
+    advance_faketab(win, win_x, Tabstop);
+    wattrset(win, A_bold | fg_bg(C_green, C_natural));
+    wprintw(win, "SRV:%u", num_clients);
+    wattrset(win, A_normal);
+  } else if (collab_mode == Collab_mode_client) {
+    advance_faketab(win, win_x, Tabstop);
+    wattrset(win, A_bold | fg_bg(C_cyan, C_natural));
+    waddstr(win, "CLIENT");
+    wattrset(win, A_normal);
+  }
   wmove(win, win_y + 1, win_x);
   wprintw(win, "%zu,%zu", ged_cursor->x, ged_cursor->y);
   advance_faketab(win, win_x, Tabstop);
@@ -897,6 +1048,12 @@ typedef struct {
   int grid_h;
   int grid_scroll_y, grid_scroll_x; // not sure if i like this being int
   U8 midi_bclock_sixths;            // 0..5, holds 6th of the quarter note step
+  // Collaboration: Remote cursors
+  Remote_cursor_list remote_cursors;
+  Cursor_throttle cursor_throttle;
+  U8 my_client_id;     // 0 = standalone/server, 1-10 = client
+  U8 my_color_index;   // Assigned cursor color
+  U8 collab_num_clients; // Server only: joined clients, for the HUD
   bool needs_remarking : 1;
   bool is_draw_dirty : 1;
   bool is_playing : 1;
@@ -905,6 +1062,7 @@ typedef struct {
   bool is_mouse_down : 1;
   bool is_mouse_dragging : 1;
   bool is_hud_visible : 1;
+  bool collab_mode : 1; // True if in collaborative session
 } Ged;
 
 static void ged_init(Ged *a, Usz undo_limit, Usz init_bpm, Usz init_seed) {
@@ -934,6 +1092,12 @@ static void ged_init(Ged *a, Usz undo_limit, Usz init_bpm, Usz init_seed) {
   a->grid_h = 0;
   a->grid_scroll_y = a->grid_scroll_x = 0;
   a->midi_bclock_sixths = 0;
+  // Collaboration state
+  remote_cursor_list_init(&a->remote_cursors);
+  cursor_throttle_init(&a->cursor_throttle);
+  a->my_client_id = 0;
+  a->my_color_index = 0;
+  a->collab_num_clients = 0;
   a->needs_remarking = true;
   a->is_draw_dirty = false;
   a->is_playing = false;
@@ -942,6 +1106,7 @@ static void ged_init(Ged *a, Usz undo_limit, Usz init_bpm, Usz init_seed) {
   a->is_mouse_down = false;
   a->is_mouse_dragging = false;
   a->is_hud_visible = false;
+  a->collab_mode = false;
 }
 
 static void ged_deinit(Ged *a) {
@@ -1436,6 +1601,14 @@ staticni void ged_draw(Ged *a, WINDOW *win, char const *filename,
       win, 0, 0, a->grid_h, win_w, a->field.buffer, a->mbuf_r.buffer,
       a->field.height, a->field.width, a->grid_scroll_y, a->grid_scroll_x,
       a->ruler_spacing_y, a->ruler_spacing_x, use_fancy_dots, use_fancy_rulers);
+  // Draw remote cursors first (underneath local cursor)
+  if (a->collab_mode) {
+    draw_all_remote_cursors(win, 0, 0, a->grid_h, win_w, a->field.buffer,
+                            a->field.height, a->field.width, a->grid_scroll_y,
+                            a->grid_scroll_x, &a->remote_cursors,
+                            a->my_client_id);
+  }
+  // Draw local cursor on top
   draw_grid_cursor(win, 0, 0, a->grid_h, win_w, a->field.buffer,
                    a->field.height, a->field.width, a->grid_scroll_y,
                    a->grid_scroll_x, a->ged_cursor.y, a->ged_cursor.x,
@@ -1444,10 +1617,23 @@ staticni void ged_draw(Ged *a, WINDOW *win, char const *filename,
   if (a->is_hud_visible) {
     filename = filename ? filename : "unnamed";
     int hud_x = win_w > 50 + a->softmargin_x * 2 ? a->softmargin_x : 0;
+    // Determine collab mode for HUD display
+    Collab_mode hud_collab_mode = Collab_mode_none;
+    U8 num_clients = 0;
+    if (a->collab_mode) {
+      // We'll set this from the Tui layer when calling ged_draw
+      // For now, use a simple indicator based on my_client_id
+      if (a->my_client_id == 0) {
+        hud_collab_mode = Collab_mode_server;
+        num_clients = a->collab_num_clients;
+      } else {
+        hud_collab_mode = Collab_mode_client;
+      }
+    }
     draw_hud(win, a->grid_h, hud_x, Hud_height, win_w, filename,
              a->field.height, a->field.width, a->ruler_spacing_y,
              a->ruler_spacing_x, a->tick_num, a->bpm, &a->ged_cursor,
-             a->input_mode, a->activity_counter);
+             a->input_mode, a->activity_counter, hud_collab_mode, num_clients);
   }
   if (a->draw_event_list)
     draw_oevent_list(win, &a->oevent_list);
@@ -1478,6 +1664,23 @@ static void ged_move_cursor_relative(Ged *a, Isz delta_y, Isz delta_x) {
                            delta_y, delta_x);
   ged_make_cursor_visible(a);
   a->is_draw_dirty = true;
+  // In collab mode, mark that cursor position may need to be broadcast
+  // (actual sending is throttled and done in the main event loop)
+}
+
+// Check if cursor update should be sent (with throttling)
+static bool ged_should_send_cursor_update(Ged *a) {
+  if (!a->collab_mode) return false;
+  return cursor_throttle_should_send(&a->cursor_throttle,
+                                     a->ged_cursor.y, a->ged_cursor.x,
+                                     a->ged_cursor.h, a->ged_cursor.w);
+}
+
+// Mark cursor update as sent (update throttle state)
+static void ged_cursor_update_sent(Ged *a) {
+  cursor_throttle_mark_sent(&a->cursor_throttle,
+                            a->ged_cursor.y, a->ged_cursor.x,
+                            a->ged_cursor.h, a->ged_cursor.w);
 }
 
 static Usz guarded_selection_axis_resize(Usz x, int delta) {
@@ -1982,6 +2185,10 @@ enum {
   Set_soft_margins_form_id,
   Set_fancy_grid_dots_menu_id,
   Set_fancy_grid_rulers_menu_id,
+  // Collaboration menus and forms
+  Collab_menu_id,
+  Collab_start_server_form_id,
+  Collab_join_server_form_id,
 #ifdef FEAT_PORTMIDI
   Portmidi_output_device_menu_id,
 #endif
@@ -2009,9 +2216,17 @@ enum {
   Main_menu_cosmetics,
   Main_menu_playback,
   Main_menu_osc,
+  Main_menu_collab, // Collaboration submenu
 #ifdef FEAT_PORTMIDI
   Main_menu_choose_portmidi_output,
 #endif
+};
+
+// Collaboration submenu item IDs
+enum {
+  Collab_menu_start_server = 1,
+  Collab_menu_join_server,
+  Collab_menu_disconnect,
 };
 
 static void push_main_menu(void) {
@@ -2033,6 +2248,7 @@ static void push_main_menu(void) {
   qmenu_add_spacer(qm);
   qmenu_add_choice(qm, Main_menu_playback, "Clock & Timing...");
   qmenu_add_choice(qm, Main_menu_cosmetics, "Appearance...");
+  qmenu_add_choice(qm, Main_menu_collab, "Collaboration...");
   qmenu_add_spacer(qm);
   qmenu_add_choice(qm, Main_menu_controls, "Controls...");
   qmenu_add_choice(qm, Main_menu_opers_guide, "Operators...");
@@ -2126,6 +2342,41 @@ static void push_playback_menu(bool midi_bclock_enabled) {
                    midi_bclock_enabled ? '*' : ' ');
   qmenu_push_to_nav(qm);
 }
+
+// Collaboration menu and forms
+static void push_collab_menu(Collab_mode mode) {
+  Qmenu *qm = qmenu_create(Collab_menu_id);
+  qmenu_set_title(qm, "Collaboration");
+  if (mode == Collab_mode_none) {
+    qmenu_add_choice(qm, Collab_menu_start_server, "Start Server...");
+    qmenu_add_choice(qm, Collab_menu_join_server, "Join Server...");
+  } else {
+    qmenu_add_choice(qm, Collab_menu_disconnect, "Disconnect");
+  }
+  qmenu_push_to_nav(qm);
+}
+
+static void push_start_server_form(U16 default_port) {
+  char port_str[8];
+  snprintf(port_str, sizeof(port_str), "%u", (unsigned)default_port);
+  qform_single_line_input(Collab_start_server_form_id, "Start Server (Port)",
+                          port_str);
+}
+
+static void push_join_server_form(const char *default_server, U16 default_port,
+                                   const char *default_name) {
+  // For join, we need server:port and name. Create a multi-input form.
+  // Format: "host:port" for server, and name separately.
+  // For simplicity, we'll use a combined "host:port" format.
+  char server_port_str[280];
+  snprintf(server_port_str, sizeof(server_port_str), "%s:%u",
+           default_server, (unsigned)default_port);
+  // TODO: Could use a multi-field form for name, but for now just use address
+  qform_single_line_input(Collab_join_server_form_id, "Join Server (host:port)",
+                          server_port_str);
+  (void)default_name; // Will be used in form handling
+}
+
 static void push_about_msg(void) {
   // clang-format off
   static char const* logo[] = {
@@ -2454,7 +2705,13 @@ static char const *const conf_file_name = "orca.conf";
   _(midi_beat_clock)                                                           \
   _(margins)                                                                   \
   _(grid_dot_type)                                                             \
-  _(grid_ruler_type)
+  _(grid_ruler_type)                                                           \
+  _(collab_default_port)                                                       \
+  _(collab_default_server)                                                     \
+  _(collab_default_name)                                                       \
+  _(collab_auto_announce)                                                      \
+  _(collab_hash_interval_ms)                                                   \
+  _(collab_cursor_throttle_ms)
 char const *const confopts[] = {CONFOPTS(CONFOPT_STRING)};
 enum { Confoptslen = ORCA_ARRAY_COUNTOF(confopts) };
 enum { CONFOPTS(CONFOPT_ENUM) };
@@ -2501,6 +2758,28 @@ staticni bool conf_read_boolish(char const *val, bool *out) {
   return false;
 }
 
+// Notification for transient messages (join/leave, etc.)
+#define TUI_NOTIFICATION_MAX_LEN 128
+#define TUI_NOTIFICATION_DURATION_MS 3000
+
+typedef struct {
+  char text[TUI_NOTIFICATION_MAX_LEN];
+  U64 timestamp_ms;
+  U32 duration_ms;
+  U8 color_index;  // For client-colored notifications
+  bool active;
+} Tui_notification;
+
+// Collaboration configuration (persistent settings)
+typedef struct {
+  U16 default_port;            // Default server port (default: 7777)
+  char default_server[256];    // Default server address (default: "localhost")
+  char default_name[64];       // Default client name (default: USER env)
+  bool auto_announce;          // Show join/leave notifications (default: true)
+  U32 hash_interval_ms;        // Hash check interval (default: 5000)
+  U32 cursor_throttle_ms;      // Cursor update throttle (default: 50)
+} Collab_config;
+
 typedef struct {
   Ged ged;
   oso *file_name;
@@ -2513,7 +2792,564 @@ typedef struct {
   bool strict_timing;
   bool osc_output_enabled;
   bool fancy_grid_dots, fancy_grid_rulers;
+  // Collaboration state
+  Collab_mode collab_mode;
+  void *collab_state; // Collab_server* or Collab_client* depending on mode
+  // Collaboration config
+  Collab_config collab_config;
+  // Notification for transient messages
+  Tui_notification notification;
 } Tui;
+
+// Show a notification message
+static void tui_show_notification(Tui *t, const char *text, U8 color_index) {
+  strncpy(t->notification.text, text, TUI_NOTIFICATION_MAX_LEN - 1);
+  t->notification.text[TUI_NOTIFICATION_MAX_LEN - 1] = '\0';
+  t->notification.timestamp_ms = collab_time_ms();
+  t->notification.duration_ms = TUI_NOTIFICATION_DURATION_MS;
+  t->notification.color_index = color_index;
+  t->notification.active = true;
+  t->ged.is_draw_dirty = true;
+}
+
+// Check if notification should still be shown
+static bool tui_notification_active(Tui *t) {
+  if (!t->notification.active)
+    return false;
+  U64 now = collab_time_ms();
+  if (now - t->notification.timestamp_ms > t->notification.duration_ms) {
+    t->notification.active = false;
+    return false;
+  }
+  return true;
+}
+
+// Clear notification
+ORCA_OK_IF_UNUSED static void tui_clear_notification(Tui *t) {
+  t->notification.active = false;
+  t->notification.text[0] = '\0';
+}
+
+// Callback for cursor updates from collaboration layer
+ORCA_OK_IF_UNUSED static void tui_collab_cursor_callback(void *userdata, const Msg_cursor_update *cursor) {
+  Tui *t = (Tui *)userdata;
+  // Update the remote cursor in our list
+  remote_cursor_update_from_msg(&t->ged.remote_cursors, cursor);
+  t->ged.is_draw_dirty = true;
+}
+
+// Callback for client events (join/leave) from server
+ORCA_OK_IF_UNUSED static void tui_collab_client_event_callback(void *userdata,
+                                                                Collab_client_event_type event,
+                                                                U8 client_id,
+                                                                U8 color_index,
+                                                                const char *name) {
+  Tui *t = (Tui *)userdata;
+  (void)client_id;  // unused for now
+
+  char msg[TUI_NOTIFICATION_MAX_LEN];
+  switch (event) {
+  case COLLAB_EVENT_CLIENT_JOINED:
+    snprintf(msg, sizeof(msg), "%s joined", name);
+    tui_show_notification(t, msg, color_index);
+    // Update cursor info for the new client
+    remote_cursor_set_info(&t->ged.remote_cursors, client_id, color_index, name);
+    break;
+  case COLLAB_EVENT_CLIENT_LEFT:
+    snprintf(msg, sizeof(msg), "%s left", name);
+    tui_show_notification(t, msg, color_index);
+    // Remove cursor for this client
+    remote_cursor_remove(&t->ged.remote_cursors, client_id);
+    break;
+  }
+}
+
+// Send cursor update if needed (with throttling)
+ORCA_OK_IF_UNUSED static void tui_collab_send_cursor_if_needed(Tui *t) {
+  if (!t->ged.collab_mode || !ged_should_send_cursor_update(&t->ged)) {
+    return;
+  }
+
+  U16 y = (U16)t->ged.ged_cursor.y;
+  U16 x = (U16)t->ged.ged_cursor.x;
+  U16 h = (U16)t->ged.ged_cursor.h;
+  U16 w = (U16)t->ged.ged_cursor.w;
+
+  switch (t->collab_mode) {
+  case Collab_mode_server:
+    if (t->collab_state) {
+      collab_server_send_cursor((Collab_server *)t->collab_state, y, x, h, w);
+      ged_cursor_update_sent(&t->ged);
+    }
+    break;
+  case Collab_mode_client:
+    if (t->collab_state) {
+      collab_client_send_cursor((Collab_client *)t->collab_state, y, x, h, w);
+      ged_cursor_update_sent(&t->ged);
+    }
+    break;
+  case Collab_mode_none:
+    break;
+  }
+}
+
+// Update collaboration state (poll network, update cursors)
+ORCA_OK_IF_UNUSED static void tui_collab_update(Tui *t) {
+  if (!t->ged.collab_mode) {
+    return;
+  }
+
+  switch (t->collab_mode) {
+  case Collab_mode_server:
+    if (t->collab_state) {
+      Collab_server *srv = (Collab_server *)t->collab_state;
+      // Network grid mirrors the live (simulated) field, so joins, hashes and
+      // the copy-back below all see operator output, not just edits.
+      field_copy(&t->ged.field, &srv->grid);
+      collab_hash_cache_invalidate(&srv->hash_cache);
+      collab_server_update(srv);
+      t->ged.collab_num_clients = collab_server_get_client_count(srv);
+      // Client writes landed on the mirror: bring them into the live field
+      if (collab_server_needs_redraw(srv)) {
+        field_copy(&srv->grid, &t->ged.field);
+        t->ged.needs_remarking = true;
+        t->ged.is_draw_dirty = true;
+      }
+    }
+    break;
+  case Collab_mode_client:
+    if (t->collab_state) {
+      Collab_client *client = (Collab_client *)t->collab_state;
+      if (collab_client_is_active(client)) {
+        // Mirror live field so hash checks compare simulated state
+        field_copy(&t->ged.field, &client->grid);
+        collab_hash_cache_invalidate(&client->hash_cache);
+      }
+      collab_client_update(client);
+      // Check if client grid was updated
+      if (collab_client_needs_redraw(client)) {
+        // Copy client's grid to our ged field
+        const Field *client_grid = collab_client_get_grid_const(client);
+        if (client_grid && client_grid->buffer) {
+          // Resize if needed
+          if (t->ged.field.height != client_grid->height ||
+              t->ged.field.width != client_grid->width) {
+            field_resize_raw(&t->ged.field, client_grid->height, client_grid->width);
+            mbuf_reusable_ensure_size(&t->ged.mbuf_r, client_grid->height, client_grid->width);
+            ged_cursor_confine(&t->ged.ged_cursor, client_grid->height, client_grid->width);
+            ged_update_internal_geometry(&t->ged);
+          }
+          // Copy grid data
+          memcpy(t->ged.field.buffer, client_grid->buffer,
+                 client_grid->height * client_grid->width * sizeof(Glyph));
+          t->ged.needs_remarking = true;
+          t->ged.is_draw_dirty = true;
+        }
+        // Update client ID and color after accept
+        t->ged.my_client_id = collab_client_get_id(client);
+        t->ged.my_color_index = collab_client_get_color(client);
+      }
+      // Check if playback state changed from server
+      if (collab_client_playback_changed(client)) {
+        bool is_playing;
+        U64 tick_num;
+        U16 bpm;
+        double accum_secs;
+        if (collab_client_get_playback_state(client, &is_playing, &tick_num, &bpm, &accum_secs)) {
+          // Update local playback state to match server
+          t->ged.is_playing = is_playing;
+          t->ged.tick_num = tick_num;
+          t->ged.bpm = bpm;
+          t->ged.accum_secs = accum_secs;
+          t->ged.is_draw_dirty = true;
+          // Reset clock to current time for proper timing
+          t->ged.clock = stm_now();
+        }
+      }
+    }
+    break;
+  case Collab_mode_none:
+    break;
+  }
+
+  // Check for cursor timeouts
+  remote_cursor_check_timeouts(&t->ged.remote_cursors);
+}
+
+// Send a single write to the collaboration layer
+ORCA_OK_IF_UNUSED static void tui_collab_send_write(Tui *t, Usz y, Usz x, Glyph glyph) {
+  if (!t->ged.collab_mode || !t->collab_state) {
+    return;
+  }
+  switch (t->collab_mode) {
+  case Collab_mode_server:
+    collab_server_write((Collab_server *)t->collab_state, (U16)y, (U16)x, glyph);
+    break;
+  case Collab_mode_client:
+    collab_client_write((Collab_client *)t->collab_state, (U16)y, (U16)x, glyph);
+    break;
+  case Collab_mode_none:
+    break;
+  }
+}
+
+// Send a batch of writes to the collaboration layer
+ORCA_OK_IF_UNUSED static void tui_collab_send_write_batch(Tui *t, const Collab_write_tuple *writes, U16 num_writes) {
+  if (!t->ged.collab_mode || !t->collab_state || num_writes == 0) {
+    return;
+  }
+  switch (t->collab_mode) {
+  case Collab_mode_server:
+    collab_server_write_batch((Collab_server *)t->collab_state, writes, num_writes);
+    break;
+  case Collab_mode_client:
+    collab_client_write_batch((Collab_client *)t->collab_state, writes, num_writes);
+    break;
+  case Collab_mode_none:
+    break;
+  }
+}
+
+// Input a character and send collaboration write if needed
+// This wraps ged_input_character to add collaboration support
+static void tui_input_character(Tui *t, char c) {
+  Ged *a = &t->ged;
+  // Determine what will be written before ged_input_character modifies state
+  Usz y = a->ged_cursor.y;
+  Usz x = a->ged_cursor.x;
+  Usz h = a->ged_cursor.h;
+  Usz w = a->ged_cursor.w;
+  bool is_fill = (h > 1 || w > 1) &&
+                 (a->input_mode == Ged_input_mode_normal ||
+                  a->input_mode == Ged_input_mode_selresize ||
+                  a->input_mode == Ged_input_mode_slide);
+
+  // Call the original ged_input_character
+  ged_input_character(a, c);
+
+  // Send collaboration writes
+  if (t->ged.collab_mode && t->collab_state) {
+    if (is_fill) {
+      // Batch write for filled selection
+      Usz count = h * w;
+      if (count <= COLLAB_MAX_BATCH_WRITES) {
+        Collab_write_tuple *writes = (Collab_write_tuple *)malloc(count * sizeof(Collab_write_tuple));
+        if (writes) {
+          Usz idx = 0;
+          for (Usz iy = 0; iy < h; iy++) {
+            for (Usz ix = 0; ix < w; ix++) {
+              writes[idx].y = (U16)(y + iy);
+              writes[idx].x = (U16)(x + ix);
+              writes[idx].glyph = (Glyph)c;
+              idx++;
+            }
+          }
+          tui_collab_send_write_batch(t, writes, (U16)count);
+          free(writes);
+        }
+      }
+    } else {
+      // Single write
+      tui_collab_send_write(t, y, x, (Glyph)c);
+    }
+  }
+}
+
+// Wrapper for fill selection operations (cut, delete, fill)
+// Broadcasts fill writes to collaboration network
+static void tui_fill_selection(Tui *t, Glyph c) {
+  Ged *a = &t->ged;
+  Usz curs_y, curs_x, curs_h, curs_w;
+  if (!ged_try_selection_clipped_to_field(a, &curs_y, &curs_x, &curs_h,
+                                          &curs_w))
+    return;
+
+  // Do the fill
+  gbuffer_fill_subrect(a->field.buffer, a->field.height, a->field.width,
+                       curs_y, curs_x, curs_h, curs_w, c);
+
+  // Broadcast to collaboration network
+  if (t->ged.collab_mode && t->collab_state) {
+    Usz count = curs_h * curs_w;
+    if (count <= COLLAB_MAX_BATCH_WRITES) {
+      Collab_write_tuple *writes = (Collab_write_tuple *)malloc(count * sizeof(Collab_write_tuple));
+      if (writes) {
+        Usz idx = 0;
+        for (Usz iy = 0; iy < curs_h; iy++) {
+          for (Usz ix = 0; ix < curs_w; ix++) {
+            writes[idx].y = (U16)(curs_y + iy);
+            writes[idx].x = (U16)(curs_x + ix);
+            writes[idx].glyph = c;
+            idx++;
+          }
+        }
+        tui_collab_send_write_batch(t, writes, (U16)count);
+        free(writes);
+      }
+    }
+  }
+}
+
+// Wrapper for paste operations
+// Broadcasts paste writes to collaboration network
+static void tui_paste(Tui *t) {
+  Ged *a = &t->ged;
+  Usz field_h = a->field.height;
+  Usz field_w = a->field.width;
+  Usz curs_y = a->ged_cursor.y;
+  Usz curs_x = a->ged_cursor.x;
+  if (curs_y >= field_h || curs_x >= field_w)
+    return;
+  Field *cb_field = &a->clipboard_field;
+  Usz cbfield_h = cb_field->height;
+  Usz cbfield_w = cb_field->width;
+  Usz cpy_h = cbfield_h;
+  Usz cpy_w = cbfield_w;
+  if (field_h - curs_y < cpy_h)
+    cpy_h = field_h - curs_y;
+  if (field_w - curs_x < cpy_w)
+    cpy_w = field_w - curs_x;
+  if (cpy_h == 0 || cpy_w == 0)
+    return;
+
+  undo_history_push(&a->undo_hist, &a->field, a->tick_num);
+  gbuffer_copy_subrect(cb_field->buffer, a->field.buffer, cbfield_h,
+                       cbfield_w, field_h, field_w, 0, 0, curs_y, curs_x,
+                       cpy_h, cpy_w);
+  a->ged_cursor.h = cpy_h;
+  a->ged_cursor.w = cpy_w;
+  a->needs_remarking = true;
+  a->is_draw_dirty = true;
+
+  // Broadcast to collaboration network
+  if (t->ged.collab_mode && t->collab_state) {
+    Usz count = cpy_h * cpy_w;
+    if (count <= COLLAB_MAX_BATCH_WRITES) {
+      Collab_write_tuple *writes = (Collab_write_tuple *)malloc(count * sizeof(Collab_write_tuple));
+      if (writes) {
+        Usz idx = 0;
+        for (Usz iy = 0; iy < cpy_h; iy++) {
+          for (Usz ix = 0; ix < cpy_w; ix++) {
+            Glyph g = cb_field->buffer[iy * cbfield_w + ix];
+            writes[idx].y = (U16)(curs_y + iy);
+            writes[idx].x = (U16)(curs_x + ix);
+            writes[idx].glyph = g;
+            idx++;
+          }
+        }
+        tui_collab_send_write_batch(t, writes, (U16)count);
+        free(writes);
+      }
+    }
+  }
+}
+
+// Wrapper for external clipboard paste (cboard_paste)
+// Broadcasts pasted region to collaboration network after cboard_paste is called
+static void tui_broadcast_paste_region(Tui *t, Usz y, Usz x, Usz h, Usz w) {
+  if (!t->ged.collab_mode || !t->collab_state)
+    return;
+
+  Usz count = h * w;
+  if (count == 0 || count > COLLAB_MAX_BATCH_WRITES)
+    return;
+
+  Collab_write_tuple *writes = (Collab_write_tuple *)malloc(count * sizeof(Collab_write_tuple));
+  if (!writes)
+    return;
+
+  Usz idx = 0;
+  for (Usz iy = 0; iy < h; iy++) {
+    for (Usz ix = 0; ix < w; ix++) {
+      Usz fy = y + iy;
+      Usz fx = x + ix;
+      if (fy < t->ged.field.height && fx < t->ged.field.width) {
+        Glyph g = t->ged.field.buffer[fy * t->ged.field.width + fx];
+        writes[idx].y = (U16)fy;
+        writes[idx].x = (U16)fx;
+        writes[idx].glyph = g;
+        idx++;
+      }
+    }
+  }
+
+  if (idx > 0) {
+    tui_collab_send_write_batch(t, writes, (U16)idx);
+  }
+  free(writes);
+}
+
+// Wrapper for bracketed paste - broadcasts a single write
+static void tui_brackpaste_write(Tui *t, Usz y, Usz x, Glyph g) {
+  gbuffer_poke(t->ged.field.buffer, t->ged.field.height,
+               t->ged.field.width, y, x, g);
+
+  if (t->ged.collab_mode && t->collab_state) {
+    tui_collab_send_write(t, y, x, g);
+  }
+}
+
+// Wrapper for input commands that need collaboration support
+// Handles cut and paste operations with proper broadcasting
+static void tui_input_cmd(Tui *t, Ged_input_cmd ev) {
+  switch (ev) {
+  case Ged_input_cmd_cut:
+    if (ged_copy_selection_to_clipbard(&t->ged)) {
+      undo_history_push(&t->ged.undo_hist, &t->ged.field, t->ged.tick_num);
+      tui_fill_selection(t, '.');
+      t->ged.needs_remarking = true;
+      t->ged.is_draw_dirty = true;
+    }
+    break;
+  case Ged_input_cmd_paste:
+    tui_paste(t);
+    break;
+  default:
+    // For all other commands, just call the original
+    ged_input_cmd(&t->ged, ev);
+    break;
+  }
+}
+
+// Wrapper for slide selection operations
+// Broadcasts all grid changes from slide to collaboration network
+static bool tui_slide_selection(Tui *t, int delta_y, int delta_x) {
+  Ged *a = &t->ged;
+  Usz curs_y_0, curs_x_0, curs_h_0, curs_w_0;
+  Usz curs_y_1, curs_x_1, curs_h_1, curs_w_1;
+  if (!ged_try_selection_clipped_to_field(a, &curs_y_0, &curs_x_0, &curs_h_0,
+                                          &curs_w_0))
+    return false;
+  ged_move_cursor_relative(a, delta_y, delta_x);
+  if (!ged_try_selection_clipped_to_field(a, &curs_y_1, &curs_x_1, &curs_h_1,
+                                          &curs_w_1))
+    return false;
+  // Don't create a history entry if nothing is going to happen.
+  if (curs_y_0 == curs_y_1 && curs_x_0 == curs_x_1 && curs_h_0 == curs_h_1 &&
+      curs_w_0 == curs_w_1)
+    return false;
+
+  // Save the data being moved BEFORE modifications
+  Usz field_h = a->field.height;
+  Usz field_w = a->field.width;
+
+  // Allocate buffer to collect all writes for collaboration
+  Usz max_writes = curs_h_0 * curs_w_0 + curs_h_0 * curs_w_0;  // Moved data + cleared area
+  Collab_write_tuple *writes = NULL;
+  Usz write_idx = 0;
+
+  if (t->ged.collab_mode && t->collab_state && max_writes <= COLLAB_MAX_BATCH_WRITES) {
+    writes = (Collab_write_tuple *)malloc(max_writes * sizeof(Collab_write_tuple));
+  }
+
+  undo_history_push(&a->undo_hist, &a->field, a->tick_num);
+
+  // Perform the copy operation
+  gbuffer_copy_subrect(a->field.buffer, a->field.buffer, field_h, field_w,
+                       field_h, field_w, curs_y_0, curs_x_0, curs_y_1, curs_x_1,
+                       curs_h_0, curs_w_0);
+
+  // Calculate areas to clear
+  Usz ey, eh, ex, ew;
+  if (curs_y_1 > curs_y_0) {
+    ey = curs_y_0;
+    eh = curs_y_1 - curs_y_0;
+  } else {
+    ey = curs_y_1 + curs_h_0;
+    eh = (curs_y_0 + curs_h_0) - ey;
+  }
+  if (curs_x_1 > curs_x_0) {
+    ex = curs_x_0;
+    ew = curs_x_1 - curs_x_0;
+  } else {
+    ex = curs_x_1 + curs_w_0;
+    ew = (curs_x_0 + curs_w_0) - ex;
+  }
+
+  // Clear the exposed areas
+  gbuffer_fill_subrect(a->field.buffer, field_h, field_w, ey, curs_x_0, eh,
+                       curs_w_0, '.');
+  gbuffer_fill_subrect(a->field.buffer, field_h, field_w, curs_y_0, ex,
+                       curs_h_0, ew, '.');
+
+  a->needs_remarking = true;
+
+  // Broadcast all changes to collaboration network
+  if (writes) {
+    // Add all destination cells (copied data)
+    for (Usz iy = 0; iy < curs_h_1; iy++) {
+      for (Usz ix = 0; ix < curs_w_1; ix++) {
+        Usz fy = curs_y_1 + iy;
+        Usz fx = curs_x_1 + ix;
+        if (fy < field_h && fx < field_w) {
+          Glyph g = a->field.buffer[fy * field_w + fx];
+          writes[write_idx].y = (U16)fy;
+          writes[write_idx].x = (U16)fx;
+          writes[write_idx].glyph = g;
+          write_idx++;
+        }
+      }
+    }
+    // Add cleared horizontal strip
+    for (Usz iy = 0; iy < eh; iy++) {
+      for (Usz ix = 0; ix < curs_w_0; ix++) {
+        Usz fy = ey + iy;
+        Usz fx = curs_x_0 + ix;
+        if (fy < field_h && fx < field_w) {
+          writes[write_idx].y = (U16)fy;
+          writes[write_idx].x = (U16)fx;
+          writes[write_idx].glyph = '.';
+          write_idx++;
+        }
+      }
+    }
+    // Add cleared vertical strip
+    for (Usz iy = 0; iy < curs_h_0; iy++) {
+      for (Usz ix = 0; ix < ew; ix++) {
+        Usz fy = curs_y_0 + iy;
+        Usz fx = ex + ix;
+        if (fy < field_h && fx < field_w) {
+          writes[write_idx].y = (U16)fy;
+          writes[write_idx].x = (U16)fx;
+          writes[write_idx].glyph = '.';
+          write_idx++;
+        }
+      }
+    }
+
+    if (write_idx > 0) {
+      tui_collab_send_write_batch(t, writes, (U16)write_idx);
+    }
+    free(writes);
+  }
+
+  return true;
+}
+
+// Wrapper for direction input that handles slide mode with collaboration support
+static void tui_dir_input(Tui *t, Ged_dir dir, int step_length) {
+  Ged *a = &t->ged;
+  if (a->input_mode == Ged_input_mode_slide) {
+    // Use collaboration-aware slide
+    switch (dir) {
+    case Ged_dir_up:
+      tui_slide_selection(t, -step_length, 0);
+      break;
+    case Ged_dir_down:
+      tui_slide_selection(t, step_length, 0);
+      break;
+    case Ged_dir_left:
+      tui_slide_selection(t, 0, -step_length);
+      break;
+    case Ged_dir_right:
+      tui_slide_selection(t, 0, step_length);
+      break;
+    }
+  } else {
+    // Use original for non-slide modes
+    ged_dir_input(a, dir, step_length);
+  }
+}
 
 ORCA_OK_IF_UNUSED staticni void print_loading_message(char const *s) {
   Usz len = strlen(s);
@@ -2592,6 +3428,58 @@ staticni void tui_load_conf(Tui *t) {
       if (plainorfancy(ez.value, &fancy)) {
         t->fancy_grid_rulers = fancy;
         touched |= TOUCHFLAG(Confopt_grid_ruler_type);
+      }
+      break;
+    }
+    case Confopt_collab_default_port: {
+      int port = atoi(ez.value);
+      if (port > 0 && port <= 65535) {
+        t->collab_config.default_port = (U16)port;
+        touched |= TOUCHFLAG(Confopt_collab_default_port);
+      }
+      break;
+    }
+    case Confopt_collab_default_server: {
+      Usz len = strlen(ez.value);
+      if (len > 0 && len < sizeof(t->collab_config.default_server)) {
+        strncpy(t->collab_config.default_server, ez.value,
+                sizeof(t->collab_config.default_server) - 1);
+        t->collab_config.default_server[sizeof(t->collab_config.default_server) - 1] = '\0';
+        touched |= TOUCHFLAG(Confopt_collab_default_server);
+      }
+      break;
+    }
+    case Confopt_collab_default_name: {
+      Usz len = strlen(ez.value);
+      if (len > 0 && len < sizeof(t->collab_config.default_name)) {
+        strncpy(t->collab_config.default_name, ez.value,
+                sizeof(t->collab_config.default_name) - 1);
+        t->collab_config.default_name[sizeof(t->collab_config.default_name) - 1] = '\0';
+        touched |= TOUCHFLAG(Confopt_collab_default_name);
+      }
+      break;
+    }
+    case Confopt_collab_auto_announce: {
+      bool enabled;
+      if (conf_read_boolish(ez.value, &enabled)) {
+        t->collab_config.auto_announce = enabled;
+        touched |= TOUCHFLAG(Confopt_collab_auto_announce);
+      }
+      break;
+    }
+    case Confopt_collab_hash_interval_ms: {
+      int val = atoi(ez.value);
+      if (val >= 1000 && val <= 60000) {
+        t->collab_config.hash_interval_ms = (U32)val;
+        touched |= TOUCHFLAG(Confopt_collab_hash_interval_ms);
+      }
+      break;
+    }
+    case Confopt_collab_cursor_throttle_ms: {
+      int val = atoi(ez.value);
+      if (val >= 10 && val <= 500) {
+        t->collab_config.cursor_throttle_ms = (U32)val;
+        touched |= TOUCHFLAG(Confopt_collab_cursor_throttle_ms);
       }
       break;
     }
@@ -2704,6 +3592,24 @@ staticni void tui_save_prefs(Tui *t) {
       break;
     case Confopt_grid_ruler_type:
       fputs(t->fancy_grid_rulers ? prefval_fancy : prefval_plain, ez.file);
+      break;
+    case Confopt_collab_default_port:
+      fprintf(ez.file, "%u", (unsigned)t->collab_config.default_port);
+      break;
+    case Confopt_collab_default_server:
+      fputs(t->collab_config.default_server, ez.file);
+      break;
+    case Confopt_collab_default_name:
+      fputs(t->collab_config.default_name, ez.file);
+      break;
+    case Confopt_collab_auto_announce:
+      fputc(t->collab_config.auto_announce ? '1' : '0', ez.file);
+      break;
+    case Confopt_collab_hash_interval_ms:
+      fprintf(ez.file, "%u", (unsigned)t->collab_config.hash_interval_ms);
+      break;
+    case Confopt_collab_cursor_throttle_ms:
+      fprintf(ez.file, "%u", (unsigned)t->collab_config.cursor_throttle_ms);
       break;
     }
   }
@@ -2934,6 +3840,45 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
           push_portmidi_output_device_menu(&t->ged.midi_mode);
           break;
 #endif
+        case Main_menu_collab:
+          push_collab_menu(t->collab_mode);
+          break;
+        }
+        break;
+      case Collab_menu_id:
+        switch (act.picked.id) {
+        case Collab_menu_start_server:
+          push_start_server_form(t->collab_config.default_port);
+          break;
+        case Collab_menu_join_server:
+          push_join_server_form(t->collab_config.default_server,
+                                t->collab_config.default_port,
+                                t->collab_config.default_name);
+          break;
+        case Collab_menu_disconnect:
+          // Disconnect from current session
+          if (t->collab_mode == Collab_mode_server && t->collab_state) {
+            collab_server_stop((Collab_server *)t->collab_state);
+            collab_server_deinit((Collab_server *)t->collab_state);
+            free(t->collab_state);
+            t->collab_state = NULL;
+            t->collab_mode = Collab_mode_none;
+            t->ged.collab_mode = false;
+            remote_cursor_list_clear(&t->ged.remote_cursors);
+          } else if (t->collab_mode == Collab_mode_client && t->collab_state) {
+            collab_client_disconnect((Collab_client *)t->collab_state);
+            collab_client_deinit((Collab_client *)t->collab_state);
+            free(t->collab_state);
+            t->collab_state = NULL;
+            t->collab_mode = Collab_mode_none;
+            t->ged.collab_mode = false;
+            remote_cursor_list_clear(&t->ged.remote_cursors);
+          }
+          while (qnav_top_block()) // close Collaboration + main menu
+            qnav_stack_pop();
+          qmsg_set_dismiss_mode(qmsg_printf_push(NULL, "Disconnected"),
+                                Qmsg_dismiss_mode_passthrough);
+          break;
         }
         break;
       case Autofit_menu_id: {
@@ -3135,12 +4080,22 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
           break;
         }
         case Set_tempo_form_id: {
+          // Clients cannot change BPM
+          if (t->collab_mode == Collab_mode_client) {
+            tui_show_notification(t, "BPM controlled by server", COLLAB_COLOR_YELLOW);
+            qnav_stack_pop();
+            break;
+          }
           oso *tmpstr = qform_get_nonempty_single_line_input(qf);
           if (!tmpstr)
             break;
           int newbpm = atoi(osoc(tmpstr));
           if (newbpm > 0) {
             t->ged.bpm = (Usz)newbpm;
+            // If server mode, broadcast BPM to clients
+            if (t->collab_mode == Collab_mode_server && t->collab_state) {
+              collab_server_set_bpm((Collab_server *)t->collab_state, (U16)newbpm);
+            }
             qnav_stack_pop();
           }
           osofree(tmpstr);
@@ -3220,6 +4175,121 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
           osofree(tmpstr);
           break;
         }
+        case Collab_start_server_form_id: {
+          oso *portstr = qform_get_nonempty_single_line_input(qf);
+          if (!portstr)
+            break;
+          int port_num = atoi(osoc(portstr));
+          osofree(portstr);
+          if (port_num <= 0 || port_num > 65535) {
+            qmsg_printf_push("Error", "Invalid port number.\nMust be 1-65535.");
+            break;
+          }
+          // Already in collab mode? Stop current session first
+          if (t->collab_mode != Collab_mode_none) {
+            qmsg_printf_push("Error", "Already in collaboration mode.\nDisconnect first.");
+            break;
+          }
+          // Allocate and start server
+          Collab_server *srv = (Collab_server *)malloc(sizeof(Collab_server));
+          if (!srv) {
+            qmsg_printf_push("Error", "Memory allocation failed.");
+            break;
+          }
+          collab_server_init(srv);
+          // Set callbacks
+          collab_server_set_cursor_callback(srv, tui_collab_cursor_callback, t);
+          collab_server_set_client_event_callback(srv, tui_collab_client_event_callback, t);
+          if (!collab_server_start(srv, (U16)port_num, &t->ged.field)) {
+            qmsg_printf_push("Error", "Failed to start server:\n%s",
+                             collab_server_get_error(srv));
+            collab_server_deinit(srv);
+            free(srv);
+            break;
+          }
+          collab_server_set_bpm(srv, (U16)t->ged.bpm);
+          collab_server_set_playing(srv, t->ged.is_playing, t->ged.tick_num,
+                                    t->ged.accum_secs);
+          t->collab_state = srv;
+          t->collab_mode = Collab_mode_server;
+          t->ged.collab_mode = true;
+          t->ged.my_client_id = 0; // Server is client_id 0
+          t->ged.my_color_index = 0;
+          while (qnav_top_block()) // close form + Collaboration + main menu
+            qnav_stack_pop();
+          // Passthrough: any key closes it and still reaches the grid
+          qmsg_set_dismiss_mode(
+              qmsg_printf_push(NULL, "Server started on port %d", port_num),
+              Qmsg_dismiss_mode_passthrough);
+          break;
+        }
+        case Collab_join_server_form_id: {
+          oso *hostport = qform_get_nonempty_single_line_input(qf);
+          if (!hostport)
+            break;
+          // Parse host:port format
+          char host[256] = "localhost";
+          int port_num = 7777;
+          char const *str = osoc(hostport);
+          // Try to find a colon for host:port format
+          char const *colon = strchr(str, ':');
+          if (colon) {
+            size_t host_len = (size_t)(colon - str);
+            if (host_len > 0 && host_len < sizeof(host)) {
+              memcpy(host, str, host_len);
+              host[host_len] = '\0';
+            }
+            port_num = atoi(colon + 1);
+          } else {
+            // Just a port number or hostname
+            int maybe_port = atoi(str);
+            if (maybe_port > 0 && maybe_port <= 65535) {
+              port_num = maybe_port;
+            } else {
+              // Treat as hostname
+              strncpy(host, str, sizeof(host) - 1);
+              host[sizeof(host) - 1] = '\0';
+            }
+          }
+          osofree(hostport);
+          if (port_num <= 0 || port_num > 65535) {
+            qmsg_printf_push("Error", "Invalid port number.");
+            break;
+          }
+          if (t->collab_mode != Collab_mode_none) {
+            qmsg_printf_push("Error", "Already in collaboration mode.\nDisconnect first.");
+            break;
+          }
+          // Allocate and connect client
+          Collab_client *client = (Collab_client *)malloc(sizeof(Collab_client));
+          if (!client) {
+            qmsg_printf_push("Error", "Memory allocation failed.");
+            break;
+          }
+          collab_client_init(client);
+          // Set cursor callback
+          collab_client_set_cursor_callback(client, tui_collab_cursor_callback, t);
+          // Get username from environment or use default
+          char const *username = getenv("USER");
+          if (!username || !username[0])
+            username = "Orca";
+          if (!collab_client_connect(client, host, (U16)port_num, username)) {
+            qmsg_printf_push("Error", "Failed to connect:\n%s",
+                             collab_client_get_error(client));
+            collab_client_deinit(client);
+            free(client);
+            break;
+          }
+          t->collab_state = client;
+          t->collab_mode = Collab_mode_client;
+          t->ged.collab_mode = true;
+          while (qnav_top_block()) // close form + Collaboration + main menu
+            qnav_stack_pop();
+          qmsg_set_dismiss_mode(
+              qmsg_printf_push(NULL, "Connecting to %s:%d...", host, port_num),
+              Qmsg_dismiss_mode_passthrough);
+          break;
+        }
         }
         break;
       }
@@ -3275,6 +4345,35 @@ int main(int argc, char **argv) {
   t.use_gui_cboard = true;
   t.fancy_grid_dots = true;
   t.fancy_grid_rulers = true;
+  // Initialize collaboration state
+  t.collab_mode = Collab_mode_none;
+  t.collab_state = NULL;
+  // Initialize collaboration config with defaults
+  t.collab_config.default_port = 7777;
+  strncpy(t.collab_config.default_server, "localhost",
+          sizeof(t.collab_config.default_server) - 1);
+  t.collab_config.default_server[sizeof(t.collab_config.default_server) - 1] = '\0';
+  // Try to get username from environment
+  {
+    const char *user = getenv("USER");
+    if (user && strlen(user) > 0) {
+      strncpy(t.collab_config.default_name, user,
+              sizeof(t.collab_config.default_name) - 1);
+    } else {
+      strncpy(t.collab_config.default_name, "User",
+              sizeof(t.collab_config.default_name) - 1);
+    }
+    t.collab_config.default_name[sizeof(t.collab_config.default_name) - 1] = '\0';
+  }
+  t.collab_config.auto_announce = true;
+  t.collab_config.hash_interval_ms = 5000;
+  t.collab_config.cursor_throttle_ms = 50;
+  // Initialize notification
+  t.notification.active = false;
+  t.notification.text[0] = '\0';
+  t.notification.timestamp_ms = 0;
+  t.notification.duration_ms = 0;
+  t.notification.color_index = 0;
 
   int longindex = 0;
   for (;;) {
@@ -3450,6 +4549,11 @@ int main(int argc, char **argv) {
   ged_set_playing(&t.ged, true);            // Auto-play
   // Enter main loop. Process events as they arrive.
 event_loop:;
+  // Process collaboration network events before handling input
+  tui_collab_update(&t);
+  // Send cursor position if needed (throttled)
+  tui_collab_send_cursor_if_needed(&t);
+
   int key = wgetch(stdscr);
   if (cur_timeout != 0) {
     wtimeout(stdscr, 0); // Until we run out, don't wait between events.
@@ -3458,11 +4562,31 @@ event_loop:;
   switch (key) {
   case ERR: { // ERR indicates no more events.
     ged_do_stuff(&t.ged);
+    // Broadcast tick sync to clients periodically (every ~500ms during playback)
+    if (t.collab_mode == Collab_mode_server && t.collab_state && t.ged.is_playing) {
+      Collab_server *srv = (Collab_server *)t.collab_state;
+      collab_server_set_tick(srv, t.ged.tick_num, t.ged.accum_secs);
+      U64 now_ms = collab_time_ms();
+      if (now_ms - srv->last_tick_sync_ms >= 500) {  // Sync every 500ms
+        collab_server_broadcast_tick_sync(srv);
+      }
+    }
     bool drew_any = false;
     if (ged_is_draw_dirty(&t.ged) || qnav_stack.occlusion_dirty) {
       werase(cont_window);
       ged_draw(&t.ged, cont_window, osoc(t.file_name), t.fancy_grid_dots,
                t.fancy_grid_rulers);
+      // Draw notification if active
+      if (tui_notification_active(&t)) {
+        int win_h, win_w;
+        getmaxyx(cont_window, win_h, win_w);
+        // Draw notification at bottom of grid area, above HUD
+        int notif_y = t.ged.grid_h > 0 ? t.ged.grid_h - 1 : win_h - 3;
+        attr_t notif_attr = A_BOLD | client_cursor_attr(t.notification.color_index, false);
+        wattron(cont_window, notif_attr);
+        mvwaddnstr(cont_window, notif_y, 1, t.notification.text, win_w - 2);
+        wattroff(cont_window, notif_attr);
+      }
       wnoutrefresh(cont_window);
       drew_any = true;
     }
@@ -3592,8 +4716,8 @@ event_loop:;
           cleaned = '.';
         if (brackpaste_y < t.ged.field.height &&
             brackpaste_x < t.ged.field.width) {
-          gbuffer_poke(t.ged.field.buffer, t.ged.field.height,
-                       t.ged.field.width, brackpaste_y, brackpaste_x, cleaned);
+          // Use collaboration-aware write
+          tui_brackpaste_write(&t, brackpaste_y, brackpaste_x, (Glyph)cleaned);
           // Could move this out one level if we wanted the final selection
           // size to reflect even the pasted area which didn't fit on the
           // grid.
@@ -3620,11 +4744,11 @@ event_loop:;
   case 127: // backspace in terminal.app, apparently
   case KEY_BACKSPACE:
     if (t.ged.input_mode == Ged_input_mode_append) {
-      ged_dir_input(&t.ged, Ged_dir_left, 1);
-      ged_input_character(&t.ged, '.');
-      ged_dir_input(&t.ged, Ged_dir_left, 1);
+      tui_dir_input(&t, Ged_dir_left, 1);
+      tui_input_character(&t, '.');
+      tui_dir_input(&t, Ged_dir_left, 1);
     } else {
-      ged_input_character(&t.ged, '.');
+      tui_input_character(&t, '.');
     }
     break;
   case CTRL_PLUS('z'):
@@ -3673,13 +4797,29 @@ event_loop:;
     // might be a bad idea to take that away, since orca will take over the
     // TTY and may leave users confused. I know of at least 1 person who was
     // saved by pressing '?' after they didn't know what to do. Hmm.
-    ged_input_character(&t.ged, '?');
+    tui_input_character(&t, '?');
     break;
   case '<':
-    ged_adjust_bpm(&t.ged, -1);
+    if (t.collab_mode == Collab_mode_client) {
+      tui_show_notification(&t, "BPM controlled by server", COLLAB_COLOR_YELLOW);
+    } else {
+      ged_adjust_bpm(&t.ged, -1);
+      // If server mode, broadcast BPM to clients
+      if (t.collab_mode == Collab_mode_server && t.collab_state) {
+        collab_server_set_bpm((Collab_server *)t.collab_state, (U16)t.ged.bpm);
+      }
+    }
     break;
   case '>':
-    ged_adjust_bpm(&t.ged, 1);
+    if (t.collab_mode == Collab_mode_client) {
+      tui_show_notification(&t, "BPM controlled by server", COLLAB_COLOR_YELLOW);
+    } else {
+      ged_adjust_bpm(&t.ged, 1);
+      // If server mode, broadcast BPM to clients
+      if (t.collab_mode == Collab_mode_server && t.collab_state) {
+        collab_server_set_bpm((Collab_server *)t.collab_state, (U16)t.ged.bpm);
+      }
+    }
     break;
   case CTRL_PLUS('f'):
     ged_input_cmd(&t.ged, Ged_input_cmd_step_forward);
@@ -3688,7 +4828,7 @@ event_loop:;
     ged_input_cmd(&t.ged, Ged_input_cmd_toggle_show_event_list);
     break;
   case CTRL_PLUS('x'):
-    ged_input_cmd(&t.ged, Ged_input_cmd_cut);
+    tui_input_cmd(&t, Ged_input_cmd_cut);
     try_send_to_gui_clipboard(&t.ged, &t.use_gui_cboard);
     break;
   case CTRL_PLUS('c'):
@@ -3707,17 +4847,20 @@ event_loop:;
         if (added_hist)
           undo_history_pop(&t.ged.undo_hist, &t.ged.field, &t.ged.tick_num);
         t.use_gui_cboard = false;
-        ged_input_cmd(&t.ged, Ged_input_cmd_paste);
+        tui_input_cmd(&t, Ged_input_cmd_paste);
       } else {
         if (pasted_h > 0 && pasted_w > 0) {
           t.ged.ged_cursor.h = pasted_h;
           t.ged.ged_cursor.w = pasted_w;
+          // Broadcast pasted region to collaboration network
+          tui_broadcast_paste_region(&t, t.ged.ged_cursor.y, t.ged.ged_cursor.x,
+                                     pasted_h, pasted_w);
         }
       }
       t.ged.needs_remarking = true;
       t.ged.is_draw_dirty = true;
     } else {
-      ged_input_cmd(&t.ged, Ged_input_cmd_paste);
+      tui_input_cmd(&t, Ged_input_cmd_paste);
     }
     break;
   case '\'':
@@ -3728,10 +4871,19 @@ event_loop:;
     ged_input_cmd(&t.ged, Ged_input_cmd_toggle_slide_mode);
     break;
   case ' ':
-    if (t.ged.input_mode == Ged_input_mode_append)
-      ged_input_character(&t.ged, '.');
-    else
+    if (t.ged.input_mode == Ged_input_mode_append) {
+      tui_input_character(&t, '.');
+    } else if (t.collab_mode == Collab_mode_client) {
+      // Clients cannot control playback - show notification
+      tui_show_notification(&t, "Playback controlled by server", COLLAB_COLOR_YELLOW);
+    } else {
       ged_input_cmd(&t.ged, Ged_input_cmd_toggle_play_pause);
+      // If server mode, broadcast play state to clients
+      if (t.collab_mode == Collab_mode_server && t.collab_state) {
+        collab_server_set_playing((Collab_server *)t.collab_state,
+                                  t.ged.is_playing, t.ged.tick_num, t.ged.accum_secs);
+      }
+    }
     break;
   case 27: // Escape
     // Check for escape sequences we're interested in that ncurses didn't
@@ -3750,25 +4902,25 @@ event_loop:;
     break;
 
   case 330: // delete?
-    ged_input_character(&t.ged, '.');
+    tui_input_character(&t, '.');
     break;
 
   // Cursor movement
   case KEY_UP:
   case CTRL_PLUS('k'):
-    ged_dir_input(&t.ged, Ged_dir_up, 1);
+    tui_dir_input(&t, Ged_dir_up, 1);
     break;
   case CTRL_PLUS('j'):
   case KEY_DOWN:
-    ged_dir_input(&t.ged, Ged_dir_down, 1);
+    tui_dir_input(&t, Ged_dir_down, 1);
     break;
   case CTRL_PLUS('h'):
   case KEY_LEFT:
-    ged_dir_input(&t.ged, Ged_dir_left, 1);
+    tui_dir_input(&t, Ged_dir_left, 1);
     break;
   case CTRL_PLUS('l'):
   case KEY_RIGHT:
-    ged_dir_input(&t.ged, Ged_dir_right, 1);
+    tui_dir_input(&t, Ged_dir_right, 1);
     break;
 
   // Selection size modification. These may not work in all terminals. (Only
@@ -3800,30 +4952,30 @@ event_loop:;
 
   // Move cursor further if control is held
   case 566: // control-up
-    ged_dir_input(&t.ged, Ged_dir_up, (int)t.ged.ruler_spacing_y);
+    tui_dir_input(&t, Ged_dir_up, (int)t.ged.ruler_spacing_y);
     break;
   case 525: // control-down
-    ged_dir_input(&t.ged, Ged_dir_down, (int)t.ged.ruler_spacing_y);
+    tui_dir_input(&t, Ged_dir_down, (int)t.ged.ruler_spacing_y);
     break;
   case 545: // control-left
-    ged_dir_input(&t.ged, Ged_dir_left, (int)t.ged.ruler_spacing_x);
+    tui_dir_input(&t, Ged_dir_left, (int)t.ged.ruler_spacing_x);
     break;
   case 560: // control-right
-    ged_dir_input(&t.ged, Ged_dir_right, (int)t.ged.ruler_spacing_x);
+    tui_dir_input(&t, Ged_dir_right, (int)t.ged.ruler_spacing_x);
     break;
 
   // Slide selection on alt-arrow
   case 564: // alt-up
-    ged_slide_selection(&t.ged, -1, 0);
+    tui_slide_selection(&t, -1, 0);
     break;
   case 523: // alt-down
-    ged_slide_selection(&t.ged, 1, 0);
+    tui_slide_selection(&t, 1, 0);
     break;
   case 543: // alt-left
-    ged_slide_selection(&t.ged, 0, -1);
+    tui_slide_selection(&t, 0, -1);
     break;
   case 558: // alt-right
-    ged_slide_selection(&t.ged, 0, 1);
+    tui_slide_selection(&t, 0, 1);
     break;
 
   case CTRL_PLUS('d'):
@@ -3842,7 +4994,7 @@ event_loop:;
 
   default:
     if (key >= CHAR_MIN && key <= CHAR_MAX && orca_is_valid_glyph((Glyph)key))
-      ged_input_character(&t.ged, (char)key);
+      tui_input_character(&t, (char)key);
 #if 0
       else
         fprintf(stderr, "Unknown key number: %d\n", key);
@@ -3852,6 +5004,25 @@ event_loop:;
   goto event_loop;
 quit:
   ged_stop_all_sustained_notes(&t.ged);
+  // Clean up collaboration state
+  if (t.collab_state) {
+    switch (t.collab_mode) {
+    case Collab_mode_server:
+      collab_server_stop((Collab_server *)t.collab_state);
+      collab_server_deinit((Collab_server *)t.collab_state);
+      free(t.collab_state);
+      break;
+    case Collab_mode_client:
+      collab_client_disconnect((Collab_client *)t.collab_state);
+      collab_client_deinit((Collab_client *)t.collab_state);
+      free(t.collab_state);
+      break;
+    case Collab_mode_none:
+      break;
+    }
+    t.collab_state = NULL;
+    t.collab_mode = Collab_mode_none;
+  }
   qnav_deinit();
   if (cont_window)
     delwin(cont_window);

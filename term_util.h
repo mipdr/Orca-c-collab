@@ -31,6 +31,27 @@ enum {
   Colors_count = C_white + 1,
 };
 
+// Client cursor colors (10 distinct colors for collaboration)
+// These map to color_index 0-9 from server assignment
+typedef enum {
+  C_client_0 = 0,   // Cyan (bright)
+  C_client_1 = 1,   // Green
+  C_client_2 = 2,   // Yellow
+  C_client_3 = 3,   // Magenta
+  C_client_4 = 4,   // Red
+  C_client_5 = 5,   // Blue
+  C_client_6 = 6,   // White (bright)
+  C_client_7 = 7,   // Cyan + Bold (teal)
+  C_client_8 = 8,   // Green + Bold (lime)
+  C_client_9 = 9,   // Magenta + Bold (purple)
+} Client_color;
+
+enum {
+  Client_colors_count = 10,
+  // Color pairs start after the base color matrix
+  Client_color_pair_base = Colors_count * Colors_count + 1,
+};
+
 enum {
   Cdef_normal = COLOR_PAIR(1),
 };
@@ -49,6 +70,11 @@ static ORCA_FORCEINLINE ORCA_OK_IF_UNUSED attr_t fg_bg(Color_name fg,
 }
 
 void term_util_init_colors(void);
+
+// Get color attributes for a client cursor
+// color_index: 0-9 client color index
+// is_local: true if this is the local user's cursor (uses bold)
+attr_t client_cursor_attr(int color_index, bool is_local);
 
 typedef enum {
   Qblock_type_qmsg,
