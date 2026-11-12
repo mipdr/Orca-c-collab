@@ -267,6 +267,7 @@ void collab_server_handle_write(Collab_server *srv, int slot,
     }
 
     collab_hash_cache_invalidate(&srv->hash_cache);
+    srv->grid_dirty = true;
 
     // Broadcast to all clients (including sender for confirmation)
     collab_server_broadcast(srv, MSG_GRID_WRITE, payload, len);
@@ -298,6 +299,7 @@ void collab_server_handle_write_batch(Collab_server *srv, int slot,
     }
 
     collab_hash_cache_invalidate(&srv->hash_cache);
+    srv->grid_dirty = true;
 
     // Broadcast to all clients
     collab_server_broadcast(srv, MSG_GRID_WRITE_BATCH, payload, len);
@@ -689,6 +691,12 @@ const Field *collab_server_get_grid(const Collab_server *srv) {
     return &srv->grid;
 }
 
+bool collab_server_needs_redraw(Collab_server *srv) {
+    bool dirty = srv->grid_dirty;
+    srv->grid_dirty = false;
+    return dirty;
+}
+
 // Get number of connected clients
 U8 collab_server_get_client_count(const Collab_server *srv) {
     U8 count = 0;
@@ -757,8 +765,7 @@ bool collab_server_send_cursor(Collab_server *srv, U16 y, U16 x, U16 h, U16 w) {
     }
 
     U8 payload[9];
-    // Server uses client_id 0
-    collab_serialize_cursor_update(payload, 0, y, x, h, w);
+    collab_serialize_cursor_update(payload, COLLAB_SERVER_CURSOR_ID, y, x, h, w);
     collab_server_broadcast(srv, MSG_CURSOR_UPDATE, payload, 9);
 
     return true;

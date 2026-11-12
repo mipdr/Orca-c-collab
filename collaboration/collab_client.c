@@ -167,8 +167,10 @@ void collab_client_handle_full_sync(Collab_client *client, const U8 *payload, Us
     client->is_playing = header.is_playing != 0;
     client->bpm = header.bpm;
     client->needs_resync = false;
+    client->playback_changed = true;  // join/resync also carries play state
 
     collab_hash_cache_invalidate(&client->hash_cache);
+    client->grid_dirty = true;
 
     if (client->state == COLLAB_CLIENT_SYNCING) {
         client->state = COLLAB_CLIENT_ACTIVE;
@@ -190,6 +192,7 @@ void collab_client_handle_write(Collab_client *client, const U8 *payload, Usz le
 
     if (collab_apply_write(&client->grid, write_msg.y, write_msg.x, write_msg.glyph)) {
         collab_hash_cache_invalidate(&client->hash_cache);
+        client->grid_dirty = true;
         COLLAB_LOG_DEBUG("Applied write from client %u: (%u, %u) = '%c'",
                          write_msg.client_id, write_msg.y, write_msg.x, write_msg.glyph);
     }
@@ -217,6 +220,7 @@ void collab_client_handle_write_batch(Collab_client *client, const U8 *payload, 
 
     if (applied > 0) {
         collab_hash_cache_invalidate(&client->hash_cache);
+        client->grid_dirty = true;
     }
 
     COLLAB_LOG_DEBUG("Applied write batch from client %u: %u/%u writes",
@@ -587,11 +591,11 @@ const char *collab_client_get_error(const Collab_client *client) {
     return client->last_error.message;
 }
 
-// Check if needs redraw (for now always false - will be set by write handlers)
-bool collab_client_needs_redraw(const Collab_client *client) {
-    (void)client;
-    // TODO: Track when grid changes and needs redraw
-    return false;
+// True once after the server changed the grid (clears the flag)
+bool collab_client_needs_redraw(Collab_client *client) {
+    bool dirty = client->grid_dirty;
+    client->grid_dirty = false;
+    return dirty;
 }
 
 // Check if playback state changed (and clear the flag)

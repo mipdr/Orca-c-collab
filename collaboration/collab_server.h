@@ -60,6 +60,7 @@ typedef struct {
     // Grid (source of truth)
     Field grid;
     Collab_hash_cache hash_cache;
+    bool grid_dirty;  // Grid changed by a client, TUI must copy it
 
     // Playback state
     U64 tick_num;
@@ -131,6 +132,8 @@ bool collab_server_write_batch(Collab_server *srv, const Collab_write_tuple *wri
 
 // Get server grid (for rendering)
 const Field *collab_server_get_grid(const Collab_server *srv);
+// True once after a client changed the grid (clears the flag)
+bool collab_server_needs_redraw(Collab_server *srv);
 
 // Get number of connected clients
 U8 collab_server_get_client_count(const Collab_server *srv);

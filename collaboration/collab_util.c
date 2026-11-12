@@ -13,6 +13,7 @@
 #include <string.h>
 #include <errno.h>
 #include <netdb.h>
+#include <stdlib.h>
 
 // Include xxHash implementation
 #define XXH_INLINE_ALL
@@ -68,8 +69,26 @@ static const char *log_level_str(Collab_log_level level) {
     }
 }
 
+// Logging is opt-in: set ORCA_COLLAB_LOG=<path>. stderr is the curses
+// terminal, so we never log there by default.
+static FILE *collab_log_stream(void) {
+    static bool opened;
+    static FILE *stream;
+    if (!opened) {
+        opened = true;
+        const char *path = getenv("ORCA_COLLAB_LOG");
+        if (path && path[0])
+            stream = fopen(path, "a");
+    }
+    return stream;
+}
+
 void collab_log(Collab_log_level level, const char *fmt, ...) {
     if (level < g_log_level) {
+        return;
+    }
+    FILE *out = collab_log_stream();
+    if (!out) {
         return;
     }
 
@@ -80,14 +99,15 @@ void collab_log(Collab_log_level level, const char *fmt, ...) {
     strftime(time_buf, sizeof(time_buf), "%H:%M:%S", tm_info);
 
     // Print log message
-    fprintf(stderr, "[%s][COLLAB][%s] ", time_buf, log_level_str(level));
+    fprintf(out, "[%s][COLLAB][%s] ", time_buf, log_level_str(level));
 
     va_list args;
     va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
+    vfprintf(out, fmt, args);
     va_end(args);
 
-    fprintf(stderr, "\n");
+    fprintf(out, "\n");
+    fflush(out);  // so `tail -f` shows messages immediately
 }
 
 // Hash utilities

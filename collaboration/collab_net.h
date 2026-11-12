@@ -11,6 +11,9 @@
 
 // Maximum clients
 #define COLLAB_MAX_CLIENTS 10
+// Client ids are 1..COLLAB_MAX_CLIENTS and 0 means "empty" in cursor lists,
+// so the server's own cursor travels under a reserved id.
+#define COLLAB_SERVER_CURSOR_ID 0xFF
 
 // Connection timeout in milliseconds
 #define COLLAB_CONNECT_TIMEOUT_MS 5000

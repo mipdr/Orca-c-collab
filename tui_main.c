@@ -1053,6 +1053,7 @@ typedef struct {
   Cursor_throttle cursor_throttle;
   U8 my_client_id;     // 0 = standalone/server, 1-10 = client
   U8 my_color_index;   // Assigned cursor color
+  U8 collab_num_clients; // Server only: joined clients, for the HUD
   bool needs_remarking : 1;
   bool is_draw_dirty : 1;
   bool is_playing : 1;
@@ -1096,6 +1097,7 @@ static void ged_init(Ged *a, Usz undo_limit, Usz init_bpm, Usz init_seed) {
   cursor_throttle_init(&a->cursor_throttle);
   a->my_client_id = 0;
   a->my_color_index = 0;
+  a->collab_num_clients = 0;
   a->needs_remarking = true;
   a->is_draw_dirty = false;
   a->is_playing = false;
@@ -1623,7 +1625,7 @@ staticni void ged_draw(Ged *a, WINDOW *win, char const *filename,
       // For now, use a simple indicator based on my_client_id
       if (a->my_client_id == 0) {
         hud_collab_mode = Collab_mode_server;
-        num_clients = remote_cursor_count(&a->remote_cursors);
+        num_clients = a->collab_num_clients;
       } else {
         hud_collab_mode = Collab_mode_client;
       }
@@ -2370,10 +2372,8 @@ static void push_join_server_form(const char *default_server, U16 default_port,
   snprintf(server_port_str, sizeof(server_port_str), "%s:%u",
            default_server, (unsigned)default_port);
   // TODO: Could use a multi-field form for name, but for now just use address
-  Qform *qf = qform_create(Collab_join_server_form_id);
-  qform_set_title(qf, "Join Server (host:port)");
-  qform_add_line_input(qf, 0, server_port_str);
-  qform_push_to_nav(qf);
+  qform_single_line_input(Collab_join_server_form_id, "Join Server (host:port)",
+                          server_port_str);
   (void)default_name; // Will be used in form handling
 }
 
@@ -2902,12 +2902,29 @@ ORCA_OK_IF_UNUSED static void tui_collab_update(Tui *t) {
   switch (t->collab_mode) {
   case Collab_mode_server:
     if (t->collab_state) {
-      collab_server_update((Collab_server *)t->collab_state);
+      Collab_server *srv = (Collab_server *)t->collab_state;
+      // Network grid mirrors the live (simulated) field, so joins, hashes and
+      // the copy-back below all see operator output, not just edits.
+      field_copy(&t->ged.field, &srv->grid);
+      collab_hash_cache_invalidate(&srv->hash_cache);
+      collab_server_update(srv);
+      t->ged.collab_num_clients = collab_server_get_client_count(srv);
+      // Client writes landed on the mirror: bring them into the live field
+      if (collab_server_needs_redraw(srv)) {
+        field_copy(&srv->grid, &t->ged.field);
+        t->ged.needs_remarking = true;
+        t->ged.is_draw_dirty = true;
+      }
     }
     break;
   case Collab_mode_client:
     if (t->collab_state) {
       Collab_client *client = (Collab_client *)t->collab_state;
+      if (collab_client_is_active(client)) {
+        // Mirror live field so hash checks compare simulated state
+        field_copy(&t->ged.field, &client->grid);
+        collab_hash_cache_invalidate(&client->hash_cache);
+      }
       collab_client_update(client);
       // Check if client grid was updated
       if (collab_client_needs_redraw(client)) {
@@ -3848,7 +3865,6 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
             t->collab_mode = Collab_mode_none;
             t->ged.collab_mode = false;
             remote_cursor_list_clear(&t->ged.remote_cursors);
-            qmsg_printf_push(NULL, "Server stopped");
           } else if (t->collab_mode == Collab_mode_client && t->collab_state) {
             collab_client_disconnect((Collab_client *)t->collab_state);
             collab_client_deinit((Collab_client *)t->collab_state);
@@ -3857,10 +3873,11 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
             t->collab_mode = Collab_mode_none;
             t->ged.collab_mode = false;
             remote_cursor_list_clear(&t->ged.remote_cursors);
-            qmsg_printf_push(NULL, "Disconnected from server");
           }
-          qnav_stack_pop();
-          pop_qnav_if_main_menu();
+          while (qnav_top_block()) // close Collaboration + main menu
+            qnav_stack_pop();
+          qmsg_set_dismiss_mode(qmsg_printf_push(NULL, "Disconnected"),
+                                Qmsg_dismiss_mode_passthrough);
           break;
         }
         break;
@@ -4190,14 +4207,20 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
             free(srv);
             break;
           }
+          collab_server_set_bpm(srv, (U16)t->ged.bpm);
+          collab_server_set_playing(srv, t->ged.is_playing, t->ged.tick_num,
+                                    t->ged.accum_secs);
           t->collab_state = srv;
           t->collab_mode = Collab_mode_server;
           t->ged.collab_mode = true;
           t->ged.my_client_id = 0; // Server is client_id 0
           t->ged.my_color_index = 0;
-          qnav_stack_pop();
-          pop_qnav_if_main_menu();
-          qmsg_printf_push(NULL, "Server started on port %d", port_num);
+          while (qnav_top_block()) // close form + Collaboration + main menu
+            qnav_stack_pop();
+          // Passthrough: any key closes it and still reaches the grid
+          qmsg_set_dismiss_mode(
+              qmsg_printf_push(NULL, "Server started on port %d", port_num),
+              Qmsg_dismiss_mode_passthrough);
           break;
         }
         case Collab_join_server_form_id: {
@@ -4260,9 +4283,11 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
           t->collab_state = client;
           t->collab_mode = Collab_mode_client;
           t->ged.collab_mode = true;
-          qnav_stack_pop();
-          pop_qnav_if_main_menu();
-          qmsg_printf_push(NULL, "Connecting to %s:%d...", host, port_num);
+          while (qnav_top_block()) // close form + Collaboration + main menu
+            qnav_stack_pop();
+          qmsg_set_dismiss_mode(
+              qmsg_printf_push(NULL, "Connecting to %s:%d...", host, port_num),
+              Qmsg_dismiss_mode_passthrough);
           break;
         }
         }

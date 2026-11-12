@@ -235,6 +235,16 @@ After clicking "Join Server":
 | **Can't change BPM (client)** | • This is normal - only server controls BPM<br>• Ask the server host to change tempo |
 | **Playback desyncs** | • Auto-corrects every 500ms<br>• If persistent, restart the session |
 
+### Logs
+
+Collaboration logging is off by default. Enable it by pointing `ORCA_COLLAB_LOG`
+at a file (use a different file per instance when running several locally):
+
+```bash
+ORCA_COLLAB_LOG=/tmp/orca-server.log ./build/orca
+tail -f /tmp/orca-server.log
+```
+
 ## ⚠️ Known Limitations
 
 ### What Works

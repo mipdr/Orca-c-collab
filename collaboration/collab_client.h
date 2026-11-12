@@ -44,6 +44,7 @@ typedef struct {
     Field grid;
     Collab_hash_cache hash_cache;
     bool needs_resync;
+    bool grid_dirty;  // Grid changed by server, TUI must copy it
 
     // Playback state (from server)
     U64 tick_num;
@@ -126,7 +127,7 @@ bool collab_client_is_active(const Collab_client *client);
 const char *collab_client_get_error(const Collab_client *client);
 
 // Check if client needs display update (grid changed)
-bool collab_client_needs_redraw(const Collab_client *client);
+bool collab_client_needs_redraw(Collab_client *client);
 
 // Check if playback state changed (and clear the flag)
 bool collab_client_playback_changed(Collab_client *client);
